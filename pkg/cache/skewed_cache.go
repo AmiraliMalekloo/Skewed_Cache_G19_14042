@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"fmt"
 	"time"
 )
 
@@ -15,37 +14,40 @@ func (c *SkewedCache) Lookup(addr uint64) (hit bool, matchedWay int, matchedSet 
 
 	c.TotalAccesses++
 
-	// TODO: Implement the lookup loop across all ways.
-	// Key difference in Skewed Cache:
-	// For each wayID from 0 to Associativity-1:
-	//   1. Calculate setIdx = c.MapToSet(blockAddr, wayID)
-	//   2. Inspect the line c.Sets[setIdx][wayID]
-	//   3. If Valid == true and Tag == tag:
-	//        - Hit detected!
-	//        - Update last access timestamp (LastAccessTime).
-	//        - c.TotalHits++
-	//        - return true, wayID, setIdx
+	for wayID := 0; wayID < c.Associativity; wayID++ {
+		setIdx := c.MapToSet(blockAddr, wayID)
+		line := &c.Sets[setIdx][wayID]
 
-	// If block is not found after inspecting all ways -> Miss occurs.
+		if line.Valid && line.Tag == tag {
+			line.LastAccessTime = time.Now().UnixNano()
+			c.TotalHits++
+			return true, wayID, setIdx
+		}
+	}
+
 	c.handleMiss(blockAddr)
 	return false, -1, -1
 }
 
 // handleMiss categorizes and updates statistics for different types of cache misses.
 func (c *SkewedCache) handleMiss(blockAddr uint64) {
-	// TODO: Implement Miss Classification logic:
-	//
-	// 1. Check for Compulsory Miss:
-	//    if c.Tracker.IsFirstAccess(blockAddr) {
-	//        c.CompulsoryMisses++
-	//        return
-	//    }
-	//
-	// 2. If not Compulsory, classify as Capacity Miss vs Conflict Miss:
-	//    - Is the entire cache capacity full? (c.OccupiedBlocks == c.NumSets * c.Associativity)
-	//      - If YES -> c.CapacityMisses++
-	//      - If NO  -> c.ConflictMisses++ 
-	//        (Because space exists in the cache, but all W candidate slots for this block are occupied)
+	if c.Tracker.IsFirstAccess(blockAddr) {
+		c.CompulsoryMisses++
+		return
+	}
+
+	totalCapacity := uint64(c.NumSets * c.Associativity)
+	if c.OccupiedBlocks >= totalCapacity {
+		// The whole cache is full: this block had to lose to some other
+		// live block no matter which way/set combination it tried.
+		c.CapacityMisses++
+		return
+	}
+
+	// The cache as a whole still has free lines somewhere, but every one
+	// of this block's W candidate slots (across its W distinct sets) was
+	// already occupied by something else -> a conflict miss.
+	c.ConflictMisses++
 }
 
 // Replace selects a victim block among the W candidates (across different sets) using LRU and replaces it.
@@ -55,29 +57,66 @@ func (c *SkewedCache) Replace(addr uint64, data []byte) (victimWay int, victimSe
 
 	blockAddr := addr / uint64(c.BlockSize)
 
-	// TODO: Implement Victim Selection logic for Skewed Cache:
-	//
-	// 1. Build a candidate array of size W. For each wayID from 0 to Associativity-1:
-	//    setIdx = c.MapToSet(blockAddr, wayID)
-	//    Candidate i: c.Sets[setIdx][wayID]
-	//
-	// 2. Check if an invalid/empty block (Valid == false) exists among the W candidates:
-	//    - If found, select it directly (no valid block needs eviction).
-	//    - c.OccupiedBlocks++
-	//
-	// 3. If all candidates are valid, apply the LRU policy:
-	//    - Identify the candidate with the oldest LastAccessTime among these W distinct sets.
-	//    - Select that entry as the victim.
-	//
-	// 4. Replace with the new block:
-	//    - c.Sets[chosenSet][chosenWay] = CacheLine{ Tag: blockAddr, Valid: true, LastAccessTime: time.Now().UnixNano(), Data: data }
+	type candidateSlot struct {
+		wayID int
+		setID int
+	}
 
-	return -1, -1
+	candidates := make([]candidateSlot, c.Associativity)
+	for wayID := 0; wayID < c.Associativity; wayID++ {
+		candidates[wayID] = candidateSlot{
+			wayID: wayID,
+			setID: c.MapToSet(blockAddr, wayID),
+		}
+	}
+
+	chosenWay, chosenSet := -1, -1
+
+	// First, look for any free (invalid) slot among the W candidates -
+	// no eviction needed in that case.
+	for _, cand := range candidates {
+		line := &c.Sets[cand.setID][cand.wayID]
+		if !line.Valid {
+			chosenWay, chosenSet = cand.wayID, cand.setID
+			c.OccupiedBlocks++
+			break
+		}
+	}
+
+	// If every candidate slot is occupied, fall back to LRU: pick the
+	// candidate with the smallest (oldest) LastAccessTime, even though
+	// the candidates live in different sets.
+	if chosenWay == -1 {
+		oldestTime := int64(1<<63 - 1) // max int64
+		for _, cand := range candidates {
+			line := &c.Sets[cand.setID][cand.wayID]
+			if line.LastAccessTime < oldestTime {
+				oldestTime = line.LastAccessTime
+				chosenWay, chosenSet = cand.wayID, cand.setID
+			}
+		}
+	}
+
+	c.Sets[chosenSet][chosenWay] = CacheLine{
+		Tag:            blockAddr,
+		Valid:          true,
+		Dirty:          false,
+		Data:           data,
+		LastAccessTime: time.Now().UnixNano(),
+	}
+
+	return chosenWay, chosenSet
 }
 
 // GetSetUtilization calculates the current utilization rate of the cache.
 func (c *SkewedCache) GetSetUtilization() float64 {
-	// TODO: Calculate the ratio of occupied blocks relative to total cache capacity,
-	// or the percentage of sets containing at least one valid line.
-	return 0.0
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	totalCapacity := float64(c.NumSets * c.Associativity)
+	if totalCapacity == 0 {
+		return 0.0
+	}
+
+	return float64(c.OccupiedBlocks) / totalCapacity
 }
