@@ -1,11 +1,9 @@
 package stats
 
 import (
-	"encoding/csv"
 	"fmt"
-	"os"
 
-	"skewed-cache-sim/pkg/cache"
+	"Skewed_Cache_G19_14042/pkg/cache"
 )
 
 type Reporter struct {
@@ -31,7 +29,7 @@ func (r *Reporter) PrintConsoleReport() {
 
 // ExportToCSV writes simulation statistics to a CSV file.
 func (r *Reporter) ExportToCSV(filePath string) error {
-	// TODO: 
+	// TODO:
 	// 1. Create target file (os.Create).
 	// 2. Write CSV header:
 	//    "TotalAccesses,TotalHits,HitRate,CompulsoryMisses,ConflictMisses,CapacityMisses,SetUtilization"
