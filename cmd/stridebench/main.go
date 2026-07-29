@@ -101,6 +101,8 @@ func main() {
 		read.TrafficClass = "memprotocol.ReadReq"
 
 		cacheComp.GetPortByName("Top").Deliver(read)
+		engine.Run()
+		agentPort.RetrieveIncoming()
 		sentIDs = append(sentIDs, read.ID)
 	}
 
